@@ -37,6 +37,7 @@ for x in a b; do d=$(sed -n 3p "$tmp/$x.out"); [ ! -e "$d" ] || { echo "FAIL: $d
 set +e; "$tmp/a/scripts/with-core.sh" -- bash -c 'pwd > '"$tmp"'/c.dir; exit 7'; rc=$?; set -e
 [ "$rc" = 7 ] || { echo "FAIL: exit status $rc, not 7"; fail=1; }
 [ ! -e "$(cat "$tmp/c.dir")" ] || { echo "FAIL: a failed run's tree was left"; fail=1; }
+rm -rf "$tmp/cache/$(cat "$here/core.lock")"  # (the planted old-layout directory: this test made it)
 ls "$tmp/cache" | grep -qv -E '^(repo\.git|lock|used-[0-9a-f]{40})$' && { echo "FAIL: the cache holds more than objects"; ls "$tmp/cache"; fail=1; }
 # (the default overlays the committed tree only; the old-layout cache directory is never used)
 "$tmp/a/scripts/with-core.sh" -- bash -c 'test ! -e web/sync/UNTRACKED && test ! -e web/sync/SENTINEL.dirty && ! grep -q edited web/sync/SENTINEL && test ! -e web/WRONG && [ "$(git rev-parse HEAD)" = "$(cat '"$tmp"'/a/core.lock)" ]' || { echo "FAIL: the commit overlay used working-tree files or a stale cache"; fail=1; }
