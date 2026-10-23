@@ -38,9 +38,69 @@ set +e; "$tmp/a/scripts/with-core.sh" -- bash -c 'pwd > '"$tmp"'/c.dir; exit 7';
 [ "$rc" = 7 ] || { echo "FAIL: exit status $rc, not 7"; fail=1; }
 [ ! -e "$(cat "$tmp/c.dir")" ] || { echo "FAIL: a failed run's tree was left"; fail=1; }
 rm -rf "$tmp/cache/$(cat "$here/core.lock")"  # (the planted old-layout directory: this test made it)
-ls "$tmp/cache" | grep -qv -E '^(repo\.git|lock|used-[0-9a-f]{40})$' && { echo "FAIL: the cache holds more than objects"; ls "$tmp/cache"; fail=1; }
+ls "$tmp/cache" | grep -qv -E '^(repo\.git|lock|active|used-[0-9a-f]{40})$' && { echo "FAIL: the cache holds more than objects"; ls "$tmp/cache"; fail=1; }
+[ -z "$(ls "$tmp/cache/active")" ] || { echo "FAIL: active entries left"; fail=1; }
 # (the default overlays the committed tree only; the old-layout cache directory is never used)
 "$tmp/a/scripts/with-core.sh" -- bash -c 'test ! -e web/sync/UNTRACKED && test ! -e web/sync/SENTINEL.dirty && ! grep -q edited web/sync/SENTINEL && test ! -e web/WRONG && [ "$(git rev-parse HEAD)" = "$(cat '"$tmp"'/a/core.lock)" ]' || { echo "FAIL: the commit overlay used working-tree files or a stale cache"; fail=1; }
 # (the explicit developer mode overlays the working tree)
 SAGEBRUSH_OVERLAY=worktree "$tmp/a/scripts/with-core.sh" -- bash -c 'test -e web/sync/UNTRACKED && grep -q edited web/sync/SENTINEL' || { echo "FAIL: worktree mode didn't overlay the working tree"; fail=1; }
+
+# ---- r3: a fixture core of 6 commits, so locks, pruning, gc and the active cap can be driven exactly
+fx=$tmp/fx; mkdir -p "$fx/core"; git -C "$fx/core" init -q
+for i in 1 2 3 4 5 6; do
+  mkdir -p "$fx/core/web"; echo "core $i" > "$fx/core/CORE"
+  git -C "$fx/core" add -A; git -C "$fx/core" -c user.name=t -c user.email=t@t commit -q -m "c$i"
+  eval "c$i=$(git -C "$fx/core" rev-parse HEAD)"
+done
+# (a cloud fixture whose committed core.lock is $1, in its own directory $fx/cloud-$1, so concurrent runs never share one)
+mkcloud() {
+  cl=$fx/cloud-$1; rm -rf "$cl"; mkdir -p "$cl/scripts" "$cl/web/sync"
+  cp "$here/scripts/with-core.sh" "$cl/scripts/"; echo "$1" > "$cl/core.lock"; echo cloud > "$cl/web/sync/CLOUD"
+  git -C "$cl" init -q; git -C "$cl" add -A; git -C "$cl" -c user.name=t -c user.email=t@t commit -q -m cloud
+}
+export SAGEBRUSH_CORE_URL=$fx/core
+fxrun() { cl=$fx/cloud-$1; shift; SAGEBRUSH_CORE_CACHE=$fx/cache "$cl/scripts/with-core.sh" "$@"; }
+# (astra's dirty lock: committed A, working tree B; the default uses A, worktree mode B)
+mkcloud "$c1"; echo "$c2" > "$fx/cloud-$c1/core.lock"
+[ "$(fxrun "$c1" -- cat CORE)" = "core 1" ] || { echo "FAIL: the default mode used the working tree's core.lock"; fail=1; }
+[ "$(SAGEBRUSH_OVERLAY=worktree fxrun "$c1" -- cat CORE)" = "core 2" ] || { echo "FAIL: worktree mode didn't use the working tree's core.lock"; fail=1; }
+# (a cloud commit with no core.lock committed is refused)
+git -C "$fx/cloud-$c1" rm -q --cached core.lock; git -C "$fx/cloud-$c1" -c user.name=t -c user.email=t@t commit -q -m nolock
+fxrun "$c1" -- true >/dev/null 2>&1 && { echo "FAIL: a commit without core.lock was accepted"; fail=1; }
+# (more than 3 distinct locks: only the newest 3 refs stay, and the pack is stable once pruned)
+for c in "$c1" "$c2" "$c3" "$c4" "$c5"; do mkcloud "$c"; fxrun "$c" -- true || { echo "FAIL: a run at $c"; fail=1; }; done
+refs=$(git -C "$fx/cache/repo.git" for-each-ref --format='%(refname)' refs/lock | sort | tr '\n' ' ')
+[ "$refs" = "$(printf 'refs/lock/%s\n' "$c3" "$c4" "$c5" | sort | tr '\n' ' ')" ] || { echo "FAIL: kept refs $refs"; fail=1; }
+for c in "$c1" "$c2"; do git -C "$fx/cache/repo.git" cat-file -e "$c^{commit}" 2>/dev/null && { echo "FAIL: pruned $c still in the cache"; fail=1; }; done
+n1=$(git -C "$fx/cache/repo.git" count-objects -v | grep -E '^(count|in-pack)' | tr '\n' ' ')
+fxrun "$c5" -- true; n2=$(git -C "$fx/cache/repo.git" count-objects -v | grep -E '^(count|in-pack)' | tr '\n' ' ')
+[ "$n1" = "$n2" ] || { echo "FAIL: objects changed on a cached rerun ($n1 / $n2)"; fail=1; }
+# (an injected gc failure fails the run and leaves gc-debt; the next run fetches nothing until a gc succeeds)
+chmod a-w "$fx/cache/repo.git/objects/pack"
+mkcloud "$c6"; fxrun "$c6" -- true >/dev/null 2>&1 && { echo "FAIL: a run whose gc failed succeeded"; fail=1; }
+[ -e "$fx/cache/gc-debt" ] || { echo "FAIL: no gc-debt after a failed gc"; fail=1; }
+mkcloud "$c1"; fxrun "$c1" -- true >/dev/null 2>&1 && { echo "FAIL: a run with gc-debt succeeded"; fail=1; }
+git -C "$fx/cache/repo.git" cat-file -e "$c1^{commit}" 2>/dev/null && { echo "FAIL: a run fetched while in gc-debt"; fail=1; }
+chmod u+w "$fx/cache/repo.git/objects/pack"
+fxrun "$c1" -- true || { echo "FAIL: the run after the gc recovered"; fail=1; }
+[ ! -e "$fx/cache/gc-debt" ] || { echo "FAIL: gc-debt stayed after a good gc"; fail=1; }
+# (the active cap: with 2, a third concurrent run waits until one ends; with no wait allowed, it fails before fetching)
+export SAGEBRUSH_CORE_MAX_ACTIVE=2
+mkcloud "$c2"; mkcloud "$c3"; mkcloud "$c4"
+fxrun "$c2" -- bash -c 'sleep 4' & p1=$!
+fxrun "$c3" -- bash -c 'sleep 4' & p2=$!
+sleep 2
+SAGEBRUSH_CORE_WAIT=0 fxrun "$c4" -- true >/dev/null 2>&1 && { echo "FAIL: a run past the cap started"; fail=1; }
+t0=$(date +%s); fxrun "$c4" -- true || { echo "FAIL: a waiting run"; fail=1; }; t1=$(date +%s)
+[ $((t1 - t0)) -ge 1 ] || { echo "FAIL: the run past the cap didn't wait"; fail=1; }
+wait $p1 $p2
+[ -z "$(git -C "$fx/cache/repo.git" worktree list | tail -n +2)" ] && [ -z "$(ls "$fx/cache/active")" ] || { echo "FAIL: worktrees left after the cap runs"; fail=1; }
+# (an invocation killed without its cleanup: the next one removes its worktree before admitting more)
+SAGEBRUSH_CORE_CACHE=$fx/cache "$fx/cloud-$c4/scripts/with-core.sh" -- bash -c 'sleep 30; : withcore-kill-fixture' & pk=$!; sleep 2
+kill -9 $pk; wait $pk 2>/dev/null || true; pkill -9 -f '[w]ithcore-kill-fixture' 2>/dev/null || true
+[ -n "$(ls "$fx/cache/active")" ] || { echo "FAIL: the killed run left no active entry to recover"; fail=1; }
+fxrun "$c4" -- true || { echo "FAIL: the run after a kill"; fail=1; }
+[ -z "$(git -C "$fx/cache/repo.git" worktree list | tail -n +2)" ] && [ -z "$(ls "$fx/cache/active")" ] || { echo "FAIL: the killed run's worktree wasn't recovered"; fail=1; }
+[ -z "$(ls -d "$tmp"/sagebrush-core.* 2>/dev/null)" ] || { echo "FAIL: worktree directories left"; fail=1; }
+unset SAGEBRUSH_CORE_MAX_ACTIVE
 [ $fail = 0 ] && echo "with-core isolation: all passed" || exit 1
