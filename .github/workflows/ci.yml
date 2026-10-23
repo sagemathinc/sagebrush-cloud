@@ -1,0 +1,45 @@
+name: ci
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  cloud:
+    # (always created and never skipped, so the required check can't pass without a build (LIMIT-CLOUD2-3):
+    # the self-hosted pool when vars.CI_RUNNER names it, otherwise GitHub's own runner, as core's web jobs do)
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    env:
+      # (git objects only, bounded: scripts/with-core.sh; each run's core worktree is its own, under RUNNER_TEMP)
+      SAGEBRUSH_CORE_CACHE: ${{ github.workspace }}/../sagebrush-core-cache
+      TMPDIR: ${{ runner.temp }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: the workflow can't be skipped; with-core.sh isolates concurrent runs
+        run: node scripts/check-ci-workflow.mjs && scripts/test-with-core.sh
+      # (one overlay for the whole job: a second with-core.sh would replace web/site again, and drop the build's web/site/public)
+      - name: core at core.lock with this checkout overlaid; build; sharing, sync and the client suite against the real server
+        run: |
+          scripts/with-core.sh -- bash -c '
+            set -e
+            scripts/ci-cpus.sh
+            pnpm install --frozen-lockfile && pnpm run build && node scripts/build-cli.mjs && bun web/build.ts
+            (cd web/site && npm ci --silent)
+            node web/share/test-share.mjs
+            node web/sync/test-sync.mjs
+            CHROME=google-chrome node web/workspace/test-workspace-sync-client.mjs
+            bun web/sync/test-inventory.mjs
+            CHROME=google-chrome node web/share/test-share-ui.mjs
+            if [ -f web/lti/test-lti.mjs ]; then node web/lti/test-lti.mjs; fi
+          '
