@@ -48,7 +48,7 @@ SAGEBRUSH_OVERLAY=worktree "$tmp/a/scripts/with-core.sh" -- bash -c 'test -e web
 # ---- r3: a fixture core of 6 commits, so locks, pruning, gc and the active cap can be driven exactly
 fx=$tmp/fx; mkdir -p "$fx/core"; git -C "$fx/core" init -q
 for i in 1 2 3 4 5 6; do
-  mkdir -p "$fx/core/web"; echo "core $i" > "$fx/core/CORE"
+  mkdir -p "$fx/core/web"; touch "$fx/core/web/.keep"; echo "core $i" > "$fx/core/CORE"
   git -C "$fx/core" add -A; git -C "$fx/core" -c user.name=t -c user.email=t@t commit -q -m "c$i"
   eval "c$i=$(git -C "$fx/core" rev-parse HEAD)"
 done
