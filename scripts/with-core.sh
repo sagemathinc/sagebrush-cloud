@@ -48,6 +48,19 @@ started() { [ -r "/proc/$1/stat" ] && sed 's/^.*) //' "/proc/$1/stat" | cut -d' 
 gc() {
   if git -C "$repo" gc -q --prune=now; then rm -f "$cache/gc-debt"; else touch "$cache/gc-debt"; echo "core cache: gc failed; refusing to grow the cache until a gc succeeds"; return 1; fi
 }
+# (remove an invocation's worktree and directory, under the lock; succeeds only once both are proven
+# gone: no directory, and no worktree registered at it.  Until then its active/ entry stays, and counts)
+reclaim() {
+  git -C "$repo" worktree remove --force "$1/core" 2>/dev/null || true
+  rm -rf "$1" 2>/dev/null || true
+  git -C "$repo" worktree prune
+  [ ! -e "$1" ] || return 1
+  local want g; want=$(realpath -m "$1/core/.git")
+  for g in "$repo"/worktrees/*/gitdir; do
+    [ -e "$g" ] && [ "$(realpath -m "$(cat "$g")")" = "$want" ] && return 1
+  done
+  return 0
+}
 
 waited=0
 while :; do
@@ -55,14 +68,13 @@ while :; do
   [ -d "$repo" ] || git init -q --bare "$repo"
   git -C "$repo" remote get-url origin >/dev/null 2>&1 || git -C "$repo" remote add origin "${SAGEBRUSH_CORE_URL:-https://github.com/sagemathinc/sagebrush.git}"
   # (recover dead invocations' worktrees first: their objects stop being roots)
-  recovered=
+  # (an entry whose removal fails again stays, counted toward the cap: a stuck tree never stops counting)
+  recovered=; stuck=0
   for f in "$cache"/active/*; do
     [ -e "$f" ] || continue
     read -r pid start dir < "$f" || true
     if [ -z "$pid" ] || [ "$(started "$pid")" != "$start" ]; then
-      git -C "$repo" worktree remove --force "$dir/core" 2>/dev/null || true
-      rm -rf "$dir" "$f"
-      recovered=1
+      if [ -n "$dir" ] && reclaim "$dir"; then rm -f "$f"; recovered=1; else stuck=$((stuck + 1)); echo "core cache: can't remove ${dir:-?} (active/$(basename "$f")); it stays counted until it can be"; fi
     fi
   done
   git -C "$repo" worktree prune
@@ -70,6 +82,8 @@ while :; do
   if [ -e "$cache/gc-debt" ] || [ -n "$recovered" ]; then gc || { flock -u 9; exit 1; }; fi
   active=$(ls "$cache/active" | wc -l)
   [ "$active" -lt "$max_active" ] && break
+  # (every slot held by a tree that can't be removed: waiting can't help, so fail now)
+  [ "$stuck" -lt "$active" ] || { flock -u 9; echo "core cache: all $active active slots are trees that can't be removed; fix them (see above) and rerun"; exit 1; }
   flock -u 9
   [ "$waited" -lt "$wait_s" ] || { echo "core cache: $active active worktrees (the cap is $max_active) for ${wait_s}s; giving up"; exit 1; }
   sleep 2; waited=$((waited + 2))
@@ -92,12 +106,17 @@ core=$work/core
 id=$(basename "$work")
 echo "$$ $(started $$) $work" > "$cache/active/$id"
 cleanup() {
+  rc=$?
   flock 9
-  git -C "$repo" worktree remove --force "$core" 2>/dev/null || true
-  git -C "$repo" worktree prune
-  rm -f "$cache/active/$id"
+  if reclaim "$work"; then
+    rm -f "$cache/active/$id"
+  else
+    # (fail closed: the entry stays, so the tree still counts toward the cap, and a later run retries it)
+    echo "core cache: couldn't remove $work; it stays counted (active/$id) until a later run removes it"
+    [ "$rc" != 0 ] || rc=1
+  fi
   flock -u 9
-  rm -rf "$work"
+  exit $rc
 }
 trap cleanup EXIT
 git -C "$repo" worktree add -q --detach "$core" "$sha"

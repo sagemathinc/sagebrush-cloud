@@ -102,5 +102,32 @@ kill -9 $pk; wait $pk 2>/dev/null || true; pkill -9 -f '[w]ithcore-kill-fixture'
 fxrun "$c4" -- true || { echo "FAIL: the run after a kill"; fail=1; }
 [ -z "$(git -C "$fx/cache/repo.git" worktree list | tail -n +2)" ] && [ -z "$(ls "$fx/cache/active")" ] || { echo "FAIL: the killed run's worktree wasn't recovered"; fail=1; }
 [ -z "$(ls -d "$tmp"/sagebrush-core.* 2>/dev/null)" ] || { echo "FAIL: worktree directories left"; fail=1; }
+# (r4: a cleanup that fails keeps its active entry, so the tree still counts, until a later run removes it)
+entry_dir() { cut -d' ' -f3 "$1"; }
+nentries() { ls "$fx/cache/active" | wc -l; }
+ntrees() { ls -d "$tmp"/sagebrush-core.* 2>/dev/null | wc -l; }
+# (an rm failure: the worktree goes, but a file the run left in its directory can't be removed)
+fxrun "$c4" -- bash -c 'mkdir -p ../stuck/d && touch ../stuck/d/f && chmod a-w ../stuck/d' >/dev/null 2>&1 && { echo "FAIL: a run whose cleanup failed exited 0"; fail=1; }
+[ "$(nentries)" = 1 ] && [ "$(ntrees)" = 1 ] || { echo "FAIL: after an rm failure: $(nentries) entries, $(ntrees) trees"; fail=1; }
+d=$(entry_dir "$fx/cache/active/"*)
+# (still stuck: the next run can't remove it either, keeps the entry, and still runs, with 1 of 2 slots taken)
+fxrun "$c4" -- true >/dev/null 2>&1 || { echo "FAIL: a run beside one stuck tree"; fail=1; }
+[ "$(nentries)" = 1 ] && [ -e "$d" ] || { echo "FAIL: the stuck tree's entry was dropped"; fail=1; }
+chmod -R u+w "$d"
+fxrun "$c4" -- true || { echo "FAIL: the run after the rm failure was fixed"; fail=1; }
+[ "$(nentries)" = 0 ] && [ "$(ntrees)" = 0 ] || { echo "FAIL: the fixed tree wasn't recovered"; fail=1; }
+# (a worktree-remove failure: the run's whole directory can't be written)
+fxrun "$c4" -- bash -c 'chmod a-w ..' >/dev/null 2>&1 && { echo "FAIL: a run whose worktree remove failed exited 0"; fail=1; }
+[ "$(nentries)" = 1 ] && [ "$(ntrees)" = 1 ] || { echo "FAIL: after a worktree-remove failure: $(nentries) entries, $(ntrees) trees"; fail=1; }
+d1=$(entry_dir "$fx/cache/active/"*)
+# (repeated: a second stuck tree fills the cap of 2; the next run fails at once, and nothing exceeds the cap)
+fxrun "$c3" -- bash -c 'chmod a-w ..' >/dev/null 2>&1
+[ "$(nentries)" = 2 ] && [ "$(ntrees)" = 2 ] || { echo "FAIL: two stuck runs: $(nentries) entries, $(ntrees) trees"; fail=1; }
+t0=$(date +%s); fxrun "$c2" -- true >/dev/null 2>&1 && { echo "FAIL: a run past a cap of stuck trees started"; fail=1; }; t1=$(date +%s)
+[ $((t1 - t0)) -lt 30 ] || { echo "FAIL: a cap of stuck trees didn't fail at once"; fail=1; }
+[ "$(nentries)" = 2 ] && [ "$(ntrees)" = 2 ] || { echo "FAIL: the bound moved: $(nentries) entries, $(ntrees) trees"; fail=1; }
+for f in "$fx/cache/active/"*; do chmod -R u+w "$(entry_dir "$f")"; done
+fxrun "$c2" -- true || { echo "FAIL: the run after the stuck trees were fixed"; fail=1; }
+[ "$(nentries)" = 0 ] && [ "$(ntrees)" = 0 ] && [ -z "$(git -C "$fx/cache/repo.git" worktree list | tail -n +2)" ] || { echo "FAIL: stuck trees weren't recovered"; fail=1; }
 unset SAGEBRUSH_CORE_MAX_ACTIVE
 [ $fail = 0 ] && echo "with-core isolation: all passed" || exit 1
