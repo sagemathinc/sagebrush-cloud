@@ -1,7 +1,7 @@
 name: ci
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
 
 jobs:
@@ -13,8 +13,10 @@ jobs:
     env:
       # (git objects only, bounded: scripts/with-core.sh; each run's core worktree is its own, under RUNNER_TEMP)
       SAGEBRUSH_CORE_CACHE: ${{ github.workspace }}/../sagebrush-core-cache
-      TMPDIR: ${{ runner.temp }}
     steps:
+      # (the runner context isn't available in a job's env, so TMPDIR is set here)
+      - name: each run's temp dir is the runner's
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
