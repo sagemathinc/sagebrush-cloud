@@ -8,7 +8,7 @@
 set -eo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/test-with-core.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT
+trap 'chmod -R u+w "$tmp" 2>/dev/null; rm -rf "$tmp"' EXIT  # (u+w: the r4 cases leave read-only trees on failure)
 export SAGEBRUSH_CORE_CACHE=$tmp/cache TMPDIR=$tmp
 fail=0
 for x in a b; do
@@ -121,7 +121,7 @@ fxrun "$c4" -- bash -c 'chmod a-w ..' >/dev/null 2>&1 && { echo "FAIL: a run who
 [ "$(nentries)" = 1 ] && [ "$(ntrees)" = 1 ] || { echo "FAIL: after a worktree-remove failure: $(nentries) entries, $(ntrees) trees"; fail=1; }
 d1=$(entry_dir "$fx/cache/active/"*)
 # (repeated: a second stuck tree fills the cap of 2; the next run fails at once, and nothing exceeds the cap)
-fxrun "$c3" -- bash -c 'chmod a-w ..' >/dev/null 2>&1
+fxrun "$c3" -- bash -c 'chmod a-w ..' >/dev/null 2>&1 || true
 [ "$(nentries)" = 2 ] && [ "$(ntrees)" = 2 ] || { echo "FAIL: two stuck runs: $(nentries) entries, $(ntrees) trees"; fail=1; }
 t0=$(date +%s); fxrun "$c2" -- true >/dev/null 2>&1 && { echo "FAIL: a run past a cap of stuck trees started"; fail=1; }; t1=$(date +%s)
 [ $((t1 - t0)) -lt 30 ] || { echo "FAIL: a cap of stuck trees didn't fail at once"; fail=1; }
